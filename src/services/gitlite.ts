@@ -1,4 +1,12 @@
-import { initDB, connect, type GitLiteClient, Collection } from '@gitlite/sdk'
+import {
+  GitLiteClient,
+  MemoryProvider,
+  GitHubProvider,
+  GiteeProvider,
+  type Collection,
+  type RuntimeAdapter,
+  type GitProvider,
+} from '@gitlite/core'
 import { AppConfig, WorkRecord } from '../types'
 import { DEFAULT_CONFIG } from '../constants'
 
@@ -56,6 +64,163 @@ const RECORDS_SCHEMA = {
   required: ['dateId'],
 }
 
+/**
+ * 纯 JS SHA-1 实现，零 Node 原生依赖，跨 Web / React Native / Electron 全环境运行
+ */
+function sha1(str: string): string {
+  const utf8 = unescape(encodeURIComponent(str))
+  const words: number[] = []
+  for (let i = 0; i < utf8.length; i++) {
+    words[i >> 2] |= (utf8.charCodeAt(i) & 0xff) << (24 - (i % 4) * 8)
+  }
+  const len = utf8.length * 8
+  words[len >> 5] |= 0x80 << (24 - (len % 32))
+  words[(((len + 64) >> 9) << 4) + 15] = len
+
+  const w = new Array(80)
+  let a = 1732584193
+  let b = -271733879
+  let c = -1732584194
+  let d = 271733878
+  let e = -1009589776
+
+  for (let i = 0; i < words.length; i += 16) {
+    const olda = a
+    const oldb = b
+    const oldc = c
+    const oldd = d
+    const olde = e
+    for (let j = 0; j < 80; j++) {
+      if (j < 16) {
+        w[j] = words[i + j] || 0
+      } else {
+        const t = w[j - 3] ^ w[j - 8] ^ w[j - 14] ^ w[j - 16]
+        w[j] = (t << 1) | (t >>> 31)
+      }
+      const t =
+        (((a << 5) | (a >>> 27)) +
+          e +
+          w[j] +
+          (j < 20
+            ? ((b & c) | (~b & d)) + 1518500249
+            : j < 40
+            ? (b ^ c ^ d) + 1859775393
+            : j < 60
+            ? ((b & c) | (b & d) | (c & d)) + -1894007588
+            : (b ^ c ^ d) + -899497514)) |
+        0
+      e = d
+      d = c
+      c = ((b << 30) | (b >>> 2)) | 0
+      b = a
+      a = t
+    }
+    a = (a + olda) | 0
+    b = (b + oldb) | 0
+    c = (c + oldc) | 0
+    d = (d + oldd) | 0
+    e = (e + olde) | 0
+  }
+  const hex = (n: number) => ('00000000' + (n >>> 0).toString(16)).slice(-8)
+  return hex(a) + hex(b) + hex(c) + hex(d) + hex(e)
+}
+
+/**
+ * 跨端通用的浏览器/移动端安全运行时适配器
+ */
+export function createUniversalRuntime(): RuntimeAdapter {
+  const memFs = new Map<string, string>()
+
+  const browserFs = {
+    async readFile(file: string) {
+      const v =
+        memFs.get(file) ??
+        (typeof localStorage !== 'undefined' ? localStorage.getItem(`gitlite:fs:${file}`) : null)
+      if (v == null) throw new Error(`ENOENT: ${file}`)
+      return v
+    },
+    async writeFile(file: string, data: string) {
+      memFs.set(file, data)
+      if (typeof localStorage !== 'undefined') {
+        try {
+          localStorage.setItem(`gitlite:fs:${file}`, data)
+        } catch {}
+      }
+    },
+    async appendFile(file: string, data: string) {
+      const cur =
+        memFs.get(file) ??
+        (typeof localStorage !== 'undefined' ? localStorage.getItem(`gitlite:fs:${file}`) : null) ??
+        ''
+      const updated = cur + data
+      memFs.set(file, updated)
+      if (typeof localStorage !== 'undefined') {
+        try {
+          localStorage.setItem(`gitlite:fs:${file}`, updated)
+        } catch {}
+      }
+    },
+    async exists(file: string) {
+      if (memFs.has(file)) return true
+      return typeof localStorage !== 'undefined' && localStorage.getItem(`gitlite:fs:${file}`) != null
+    },
+    async mkdir(_dir: string) {
+      // 浏览器环境无需实际文件夹
+    },
+  }
+
+  const browserCrypto = {
+    randomBytes(n: number) {
+      const buf = new Uint8Array(n)
+      if (typeof globalThis.crypto !== 'undefined' && globalThis.crypto.getRandomValues) {
+        globalThis.crypto.getRandomValues(buf)
+      } else {
+        for (let i = 0; i < n; i++) buf[i] = Math.floor(Math.random() * 256)
+      }
+      return buf
+    },
+    sha1hex(s: string) {
+      return sha1(s)
+    },
+  }
+
+  const browserCredential = {
+    async set(key: string, value: string) {
+      if (typeof localStorage !== 'undefined') {
+        try {
+          localStorage.setItem(`gitlite:cred:${key}`, value)
+        } catch {}
+      }
+    },
+    async get(key: string) {
+      if (typeof localStorage !== 'undefined') {
+        return localStorage.getItem(`gitlite:cred:${key}`)
+      }
+      return null
+    },
+    async delete(key: string) {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.removeItem(`gitlite:cred:${key}`)
+      }
+    },
+  }
+
+  return {
+    fs: browserFs,
+    crypto: browserCrypto,
+    credential: browserCredential,
+    fetch: globalThis.fetch ? globalThis.fetch.bind(globalThis) : fetch,
+    now: () => Date.now(),
+    onExit(fn: () => void | Promise<void>) {
+      if (typeof window !== 'undefined') {
+        window.addEventListener('beforeunload', () => {
+          void fn()
+        })
+      }
+    },
+  }
+}
+
 let dbInstance: GitLiteClient | null = null
 let configCol: Collection<DbConfigDoc> | null = null
 let recordsCol: Collection<DbRecordDoc> | null = null
@@ -107,9 +272,8 @@ export function getDbStatus() {
 }
 
 /**
- * 规范初始化 GitLite 嵌入式数据库
- * 首次调用：引导用户浏览器授权并自动在私有仓建分支
- * 二次调用：幂等静默直连
+ * 跨端安全初始化 GitLite 嵌入式数据库
+ * 优先采用零原生依赖的 @gitlite/core 纯引擎，在 Web 与移动端完全杜绝 Node 原生模块报错
  */
 export async function getOrInitGitLiteDB(options?: {
   provider?: 'github' | 'gitee' | 'memory'
@@ -124,21 +288,57 @@ export async function getOrInitGitLiteDB(options?: {
     return initPromise
   }
 
-  const provider = options?.provider ?? 'github'
+  const providerName = options?.provider ?? 'github'
   const database = options?.database ?? 'workhour-tracker'
+  const runtime = createUniversalRuntime()
 
   initPromise = (async () => {
     try {
-      // 按照规范使用 initDB 初始化
-      const client = await initDB({
+      let savedToken = options?.token
+      if (!savedToken) {
+        savedToken = (await runtime.credential.get(`gitlite:${providerName}:token`)) ?? undefined
+      }
+
+      let provider: GitProvider
+      let owner = 'user'
+      let repo = 'gitlite-repo'
+
+      if (providerName === 'github') {
+        if (savedToken) {
+          const gh = new GitHubProvider(savedToken, runtime.fetch)
+          provider = gh
+          try {
+            const user = await gh.getUser()
+            owner = user.login
+          } catch {
+            owner = 'user'
+          }
+        } else {
+          provider = new MemoryProvider()
+        }
+      } else if (providerName === 'gitee') {
+        if (savedToken) {
+          const gitee = new GiteeProvider(savedToken, runtime.fetch)
+          provider = gitee
+          try {
+            const user = await gitee.getUser()
+            owner = user.login
+          } catch {
+            owner = 'user'
+          }
+        } else {
+          provider = new MemoryProvider()
+        }
+      } else {
+        provider = new MemoryProvider()
+      }
+
+      const client = await GitLiteClient.create({
         provider,
+        runtime,
+        ref: { owner, repo },
         database,
-        token: options?.token,
-        force: options?.force,
         allowForeignRepo: true,
-        onProgress: (step, detail) => {
-          console.log(`[GitLite] 步骤: ${step}${detail ? ` (${JSON.stringify(detail)})` : ''}`)
-        },
       })
 
       dbInstance = client
@@ -151,7 +351,7 @@ export async function getOrInitGitLiteDB(options?: {
       const syncStatus = client.syncStatus()
       currentDbStatus = {
         isReady: true,
-        provider,
+        provider: providerName,
         database,
         online: syncStatus.online,
         pendingOps: syncStatus.pendingOps,
@@ -181,13 +381,14 @@ export async function getOrInitGitLiteDB(options?: {
       notifyStatusChange()
       return client
     } catch (err: any) {
-      console.warn(`[GitLite] 数据库初始化异常: ${err?.message || err}`)
-      // 优雅降级到本地内存就绪模式，保证应用秒开与离线读写
-      const fallbackClient = await connect({
-        provider: 'memory',
-        owner: 'local-user',
-        repo: 'gitlite-repo',
+      console.warn(`[GitLite] 数据库初始化降级: ${err?.message || err}`)
+      const fallbackProvider = new MemoryProvider()
+      const fallbackClient = await GitLiteClient.create({
+        provider: fallbackProvider,
+        runtime,
+        ref: { owner: 'local-user', repo: 'gitlite-repo' },
         database,
+        allowForeignRepo: true,
       })
 
       dbInstance = fallbackClient
@@ -199,12 +400,12 @@ export async function getOrInitGitLiteDB(options?: {
 
       currentDbStatus = {
         isReady: true,
-        provider: 'memory (offline)',
+        provider: `${providerName} (offline)`,
         database,
         online: false,
         pendingOps: 0,
         lastSyncAt: null,
-        error: err?.message || '离线内存模式',
+        error: err?.message || '离线本地模式',
         isSyncing: false,
       }
       notifyStatusChange()
