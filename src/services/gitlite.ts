@@ -288,44 +288,53 @@ export async function getOrInitGitLiteDB(options?: {
     return initPromise
   }
 
-  const providerName = options?.provider ?? 'github'
-  const database = options?.database ?? 'workhour-tracker'
   const runtime = createUniversalRuntime()
+  const database = options?.database ?? 'workhour-tracker'
 
   initPromise = (async () => {
+    let providerName = options?.provider
+    if (!providerName) {
+      providerName =
+        ((await runtime.credential.get('gitlite:active_provider')) as 'github' | 'gitee' | 'memory') ??
+        'github'
+    }
+
     try {
       let savedToken = options?.token
-      if (!savedToken) {
+      if (savedToken !== undefined) {
+        if (savedToken) {
+          await runtime.credential.set(`gitlite:${providerName}:token`, savedToken)
+        } else {
+          await runtime.credential.delete(`gitlite:${providerName}:token`)
+        }
+      } else {
         savedToken = (await runtime.credential.get(`gitlite:${providerName}:token`)) ?? undefined
       }
 
+      await runtime.credential.set('gitlite:active_provider', providerName)
+
       let provider: GitProvider
       let owner = 'user'
-      let repo = 'gitlite-repo'
+      const repo = 'gitlite-repo'
+      let isCloudOnline = false
 
       if (providerName === 'github') {
         if (savedToken) {
           const gh = new GitHubProvider(savedToken, runtime.fetch)
+          const user = await gh.getUser()
+          owner = user.login
           provider = gh
-          try {
-            const user = await gh.getUser()
-            owner = user.login
-          } catch {
-            owner = 'user'
-          }
+          isCloudOnline = true
         } else {
           provider = new MemoryProvider()
         }
       } else if (providerName === 'gitee') {
         if (savedToken) {
           const gitee = new GiteeProvider(savedToken, runtime.fetch)
+          const user = await gitee.getUser()
+          owner = user.login
           provider = gitee
-          try {
-            const user = await gitee.getUser()
-            owner = user.login
-          } catch {
-            owner = 'user'
-          }
+          isCloudOnline = true
         } else {
           provider = new MemoryProvider()
         }
@@ -353,7 +362,7 @@ export async function getOrInitGitLiteDB(options?: {
         isReady: true,
         provider: providerName,
         database,
-        online: syncStatus.online,
+        online: isCloudOnline || syncStatus.online,
         pendingOps: syncStatus.pendingOps,
         lastSyncAt: syncStatus.lastSyncAt,
         error: null,
@@ -366,9 +375,9 @@ export async function getOrInitGitLiteDB(options?: {
         const updated = client.syncStatus()
         currentDbStatus = {
           ...currentDbStatus,
-          online: updated.online,
+          online: true,
           pendingOps: updated.pendingOps,
-          lastSyncAt: updated.lastSyncAt,
+          lastSyncAt: updated.lastSyncAt || new Date().toLocaleTimeString(),
           isSyncing: false,
         }
         notifyStatusChange()
@@ -381,7 +390,7 @@ export async function getOrInitGitLiteDB(options?: {
       notifyStatusChange()
       return client
     } catch (err: any) {
-      console.warn(`[GitLite] 数据库初始化降级: ${err?.message || err}`)
+      console.warn(`[GitLite] 数据库连接异常: ${err?.message || err}`)
       const fallbackProvider = new MemoryProvider()
       const fallbackClient = await GitLiteClient.create({
         provider: fallbackProvider,
@@ -409,6 +418,9 @@ export async function getOrInitGitLiteDB(options?: {
         isSyncing: false,
       }
       notifyStatusChange()
+      if (options?.force) {
+        throw err
+      }
       return fallbackClient
     }
   })()

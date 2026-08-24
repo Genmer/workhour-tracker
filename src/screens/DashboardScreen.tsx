@@ -1,21 +1,47 @@
 import { useState, useMemo } from 'react'
-import { StyleSheet, View, ScrollView, Text, TouchableOpacity, Alert, ActivityIndicator } from 'react-native'
+import { StyleSheet, View, ScrollView, Text, TouchableOpacity, ActivityIndicator } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { useAppStore } from '../stores/useAppStore'
 import { ClockOutButton } from '../components/ClockOutButton'
 import { LeaveToggle } from '../components/LeaveToggle'
 import { ProgressCard } from '../components/ProgressCard'
 import { TimePickerModal } from '../components/TimePickerModal'
+import { ConfirmModal } from '../components/ConfirmModal'
+import { GitLiteAuthModal } from '../components/GitLiteAuthModal'
+import { Toast, ToastType } from '../components/Toast'
 import { COLORS } from '../constants'
 import { useLiveTime } from '../utils/useLiveTime'
 import { calculateMonthlyStats, calculateWeeklyStats, toDateId } from '../utils/workHours'
 import dayjs from 'dayjs'
 
 export function DashboardScreen() {
-  const { config, records, dbStatus, clockOut, undoClockOut, toggleLeave, setRecordTime, syncToCloud } = useAppStore()
+  const {
+    config,
+    records,
+    dbStatus,
+    clockOut,
+    undoClockOut,
+    toggleLeave,
+    setRecordTime,
+    syncToCloud,
+    reconnectProvider,
+  } = useAppStore()
+
   const today = useLiveTime()
   const [editModalVisible, setEditModalVisible] = useState(false)
+  const [undoConfirmVisible, setUndoConfirmVisible] = useState(false)
+  const [authModalVisible, setAuthModalVisible] = useState(false)
   const [isSyncing, setIsSyncing] = useState(false)
+
+  const [toast, setToast] = useState<{ visible: boolean; message: string; type: ToastType }>({
+    visible: false,
+    message: '',
+    type: 'info',
+  })
+
+  const showToast = (message: string, type: ToastType = 'info') => {
+    setToast({ visible: true, message, type })
+  }
 
   const todayId = toDateId(today)
   const todayRecord = records[todayId]
@@ -44,41 +70,54 @@ export function DashboardScreen() {
     })
   }, [allRecords, config])
 
-  const handleClockOut = () => {
+  const handleClockOutPress = () => {
     if (isClocked) {
-      Alert.alert('撤销打卡', '确定要撤销今日的下班打卡记录吗？', [
-        { text: '取消', style: 'cancel' },
-        {
-          text: '确定撤销',
-          style: 'destructive',
-          onPress: () => undoClockOut(todayId),
-        },
-      ])
+      setUndoConfirmVisible(true)
     } else {
       clockOut()
+      showToast('今日下班打卡成功！已即时落盘', 'success')
     }
+  }
+
+  const handleConfirmUndoClockOut = () => {
+    setUndoConfirmVisible(false)
+    undoClockOut(todayId)
+    showToast('已撤销今日下班打卡记录', 'info')
   }
 
   const handleToggleLeave = () => {
     toggleLeave(todayId)
+    if (isLeave) {
+      showToast('已取消今日请假标记', 'info')
+    } else {
+      showToast('已标记今日为请假状态', 'success')
+    }
   }
 
   const handleEditConfirm = (time: string) => {
     setRecordTime(todayId, time)
     setEditModalVisible(false)
+    showToast(`下班时间已更新为 ${time}`, 'success')
   }
 
   const handleManualSync = async () => {
     if (isSyncing) return
     setIsSyncing(true)
+    showToast('正在推送到云端 Git 仓库...', 'info')
+
     try {
       await syncToCloud()
-      Alert.alert('同步完成 ✓', '本地打卡记录已成功同步到云端 Git 仓库！')
+      showToast('本地记录已成功同步到云端！', 'success')
     } catch (e: any) {
-      Alert.alert('同步提示', e?.message || '已保存在本地离线队列，将在网络恢复后自动推送')
+      showToast(e?.message || '已保存在本地离线队列中', 'error')
     } finally {
       setIsSyncing(false)
     }
+  }
+
+  const handleConnectProvider = async (provider: 'github' | 'gitee' | 'memory', token?: string) => {
+    await reconnectProvider(provider, token)
+    showToast(`已连接至 ${provider.toUpperCase()}！`, 'success')
   }
 
   // 格式化加班提示
@@ -122,7 +161,7 @@ export function DashboardScreen() {
           {/* GitLite 状态指示胶囊 */}
           <TouchableOpacity
             style={styles.gitlitePill}
-            onPress={handleManualSync}
+            onPress={() => setAuthModalVisible(true)}
             activeOpacity={0.7}
           >
             <View
@@ -139,15 +178,21 @@ export function DashboardScreen() {
             ) : (
               <Text style={styles.pillText}>
                 {dbStatus.pendingOps && dbStatus.pendingOps > 0
-                  ? `☁️ ${dbStatus.pendingOps} 条待同步 · 点击推送`
-                  : `⚡ GitLite · ${dbStatus.provider === 'github' ? 'GitHub' : dbStatus.provider} 已连接`}
+                  ? `☁️ ${dbStatus.pendingOps} 条待同步 · 点击配置`
+                  : `⚡ GitLite · ${
+                      dbStatus.provider === 'github'
+                        ? 'GitHub'
+                        : dbStatus.provider === 'gitee'
+                        ? 'Gitee'
+                        : '本地离线'
+                    } 已就绪`}
               </Text>
             )}
           </TouchableOpacity>
         </View>
 
         <View style={styles.clockArea}>
-          <ClockOutButton isClocked={isClocked} onPress={handleClockOut} />
+          <ClockOutButton isClocked={isClocked} onPress={handleClockOutPress} />
           <LeaveToggle isLeave={isLeave} onPress={handleToggleLeave} />
         </View>
 
@@ -159,7 +204,8 @@ export function DashboardScreen() {
           >
             <View style={styles.clockResultBadge}>
               <Text style={styles.clockResultText}>
-                下班时间 <Text style={styles.clockResultValue}>{todayRecord.clockOutTime}</Text> · 工时 <Text style={styles.clockResultValue}>{todayRecord.actualWorkHours}h</Text>
+                下班时间 <Text style={styles.clockResultValue}>{todayRecord.clockOutTime}</Text> · 工时{' '}
+                <Text style={styles.clockResultValue}>{todayRecord.actualWorkHours}h</Text>
               </Text>
               <Text style={styles.clockResultEditHint}>修改 ✏️</Text>
             </View>
@@ -189,9 +235,7 @@ export function DashboardScreen() {
         {weeklyStats.gap > 0 && weekHint && (
           <View style={styles.alertBanner}>
             <Text style={styles.alertIcon}>📊</Text>
-            <Text style={styles.alertText}>
-              {weekHint}
-            </Text>
+            <Text style={styles.alertText}>{weekHint}</Text>
           </View>
         )}
 
@@ -205,9 +249,7 @@ export function DashboardScreen() {
         {monthlyStats.gap > 0 && monthHint && (
           <View style={styles.alertBanner}>
             <Text style={styles.alertIcon}>⚠️</Text>
-            <Text style={styles.alertText}>
-              {monthHint}
-            </Text>
+            <Text style={styles.alertText}>{monthHint}</Text>
           </View>
         )}
 
@@ -219,6 +261,7 @@ export function DashboardScreen() {
         )}
       </ScrollView>
 
+      {/* 修改打卡时间弹窗 */}
       <TimePickerModal
         visible={editModalVisible}
         dateId={todayId}
@@ -226,6 +269,33 @@ export function DashboardScreen() {
         onConfirm={handleEditConfirm}
         onMarkLeave={handleToggleLeave}
         onClose={() => setEditModalVisible(false)}
+      />
+
+      {/* 撤销打卡确认弹窗 */}
+      <ConfirmModal
+        visible={undoConfirmVisible}
+        title="撤销打卡"
+        message="确定要撤销今日的下班打卡记录吗？"
+        confirmText="确定撤销"
+        confirmStyle="danger"
+        onConfirm={handleConfirmUndoClockOut}
+        onCancel={() => setUndoConfirmVisible(false)}
+      />
+
+      {/* GitLite 鉴权配置弹窗 */}
+      <GitLiteAuthModal
+        visible={authModalVisible}
+        currentStatus={dbStatus}
+        onClose={() => setAuthModalVisible(false)}
+        onConnect={handleConnectProvider}
+      />
+
+      {/* 全局反馈 Toast */}
+      <Toast
+        visible={toast.visible}
+        message={toast.message}
+        type={toast.type}
+        onHide={() => setToast((prev) => ({ ...prev, visible: false }))}
       />
     </SafeAreaView>
   )

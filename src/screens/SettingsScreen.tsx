@@ -1,11 +1,23 @@
 import { useState, useEffect } from 'react'
-import { StyleSheet, View, ScrollView, Text, TextInput, TouchableOpacity, Alert, ActivityIndicator, Platform } from 'react-native'
+import {
+  StyleSheet,
+  View,
+  ScrollView,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  ActivityIndicator,
+  Platform,
+} from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { useAppStore } from '../stores/useAppStore'
 import { COLORS } from '../constants'
 import { WeekType } from '../types'
 import { documentDirectory, writeAsStringAsync, readAsStringAsync, getInfoAsync } from 'expo-file-system/legacy'
 import { shareAsync } from 'expo-sharing'
+import { Toast, ToastType } from '../components/Toast'
+import { ConfirmModal } from '../components/ConfirmModal'
+import { GitLiteAuthModal } from '../components/GitLiteAuthModal'
 
 export function SettingsScreen() {
   const {
@@ -29,6 +41,19 @@ export function SettingsScreen() {
   const [isFlushing, setIsFlushing] = useState(false)
   const [isPulling, setIsPulling] = useState(false)
 
+  // 弹窗与反馈状态
+  const [authModalVisible, setAuthModalVisible] = useState(false)
+  const [importConfirmVisible, setImportConfirmVisible] = useState(false)
+  const [toast, setToast] = useState<{ visible: boolean; message: string; type: ToastType }>({
+    visible: false,
+    message: '',
+    type: 'info',
+  })
+
+  const showToast = (message: string, type: ToastType = 'info') => {
+    setToast({ visible: true, message, type })
+  }
+
   useEffect(() => {
     setTargetDaysInput(String(config.monthlyTargetDays))
     setStartTimeInput(config.dailyStartTime)
@@ -40,23 +65,23 @@ export function SettingsScreen() {
   const handleSaveWorkHoursConfig = () => {
     const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/
     if (!timeRegex.test(startTimeInput)) {
-      Alert.alert('无效上班时间', '请输入 HH:mm 格式（例如 09:00）')
+      showToast('上班时间格式需为 HH:mm（如 09:00）', 'error')
       return
     }
     if (!timeRegex.test(overtimeEndInput)) {
-      Alert.alert('无效加班基准时间', '请输入 HH:mm 格式（例如 22:30）')
+      showToast('加班基准格式需为 HH:mm（如 22:30）', 'error')
       return
     }
 
     const lunch = parseFloat(lunchBreakInput)
     if (isNaN(lunch) || lunch < 0 || lunch > 5) {
-      Alert.alert('无效午休时长', '请输入 0 到 5 之间的小时数')
+      showToast('午休时长需在 0 到 5 小时之间', 'error')
       return
     }
 
     const target = parseFloat(targetHoursInput)
     if (isNaN(target) || target <= 0 || target > 24) {
-      Alert.alert('无效目标工时', '请输入有效的目标工时（如 10.5）')
+      showToast('每日目标工时需为有效数字（如 10.5）', 'error')
       return
     }
 
@@ -66,31 +91,34 @@ export function SettingsScreen() {
       lunchBreakHours: lunch,
       targetDailyHours: target,
     })
-    Alert.alert('工时配置已保存 ✓')
+    showToast('工时参数配置已保存 ✓', 'success')
   }
 
   const handleSaveTargetDays = () => {
     const days = parseInt(targetDaysInput, 10)
     if (days > 0 && days <= 31) {
       setMonthlyTargetDays(days)
-      Alert.alert('已保存 ✓')
+      showToast(`本月出勤天数已设为 ${days} 天 ✓`, 'success')
     } else {
-      Alert.alert('无效输入', '请输入1-31之间的天数')
+      showToast('请输入 1 到 31 之间的有效天数', 'error')
     }
   }
 
   const handleToggleWeekType = (type: WeekType) => {
     updateConfig({ currentWeekType: type })
+    showToast(`已切换为${type === 'BIG_WEEK' ? '大周（单休）' : '小周（双休）'}`, 'info')
   }
 
   const handleManualFlush = async () => {
     if (isFlushing) return
     setIsFlushing(true)
+    showToast('正在推送到云端 Git 仓库...', 'info')
+
     try {
       await syncToCloud()
-      Alert.alert('推送成功 ✓', '本地数据已打包为 Git Commit 并同步到云端！')
+      showToast('本地数据已打包 Commit 并同步到云端！', 'success')
     } catch (e: any) {
-      Alert.alert('推送提示', e?.message || '已安全缓存在本地离线队列中')
+      showToast(e?.message || '已安全落盘至本地队列，将在联网时自动重推', 'error')
     } finally {
       setIsFlushing(false)
     }
@@ -99,42 +127,21 @@ export function SettingsScreen() {
   const handleManualPull = async () => {
     if (isPulling) return
     setIsPulling(true)
+    showToast('正在从云端拉取最新数据...', 'info')
+
     try {
       await pullFromCloud()
-      Alert.alert('拉取成功 ✓', '已从云端 Git 仓库拉取最新数据并完成三路合并！')
+      showToast('已从云端拉取最新数据并完成三路合并！', 'success')
     } catch (e: any) {
-      Alert.alert('拉取提示', e?.message || '当前处于离线模式或网络未连接')
+      showToast(e?.message || '当前处于离线模式或网络未连接', 'error')
     } finally {
       setIsPulling(false)
     }
   }
 
-  const handleSwitchPlatform = () => {
-    Alert.alert('切换 GitLite 云端平台', '请选择你要绑定的 Git 云端平台：', [
-      { text: '取消', style: 'cancel' },
-      {
-        text: 'GitHub',
-        onPress: async () => {
-          try {
-            await reconnectProvider('github')
-            Alert.alert('已切换至 GitHub', '正在自动探测/连接私有仓库 gitlite-repo')
-          } catch (e: any) {
-            Alert.alert('连接提示', e?.message || '连接失败')
-          }
-        },
-      },
-      {
-        text: 'Gitee',
-        onPress: async () => {
-          try {
-            await reconnectProvider('gitee')
-            Alert.alert('已切换至 Gitee', '正在自动探测/连接私有仓库 gitlite-repo')
-          } catch (e: any) {
-            Alert.alert('连接提示', e?.message || '连接失败')
-          }
-        },
-      },
-    ])
+  const handleConnectProvider = async (provider: 'github' | 'gitee' | 'memory', token?: string) => {
+    await reconnectProvider(provider, token)
+    showToast(`已成功切换至 ${provider.toUpperCase()} 平台！`, 'success')
   }
 
   const handleExport = async () => {
@@ -149,19 +156,19 @@ export function SettingsScreen() {
         a.download = 'workhour-backup.json'
         a.click()
         URL.revokeObjectURL(url)
-        Alert.alert('数据已导出 ✓', `已导出 ${Object.keys(data.records).length} 条考勤记录`)
+        showToast(`已导出 ${Object.keys(data.records).length} 条考勤记录备份`, 'success')
         return
       }
       const fileUri = documentDirectory + 'workhour-backup.json'
       await writeAsStringAsync(fileUri, json)
       await shareAsync(fileUri)
-      Alert.alert('数据已导出 ✓', `已导出 ${Object.keys(data.records).length} 条考勤记录`)
+      showToast(`已导出 ${Object.keys(data.records).length} 条考勤记录备份`, 'success')
     } catch (error) {
-      Alert.alert('导出失败', '无法导出数据')
+      showToast('导出数据失败', 'error')
     }
   }
 
-  const handleImport = async () => {
+  const handleTriggerImport = () => {
     if (Platform.OS === 'web') {
       const input = document.createElement('input')
       input.type = 'file'
@@ -173,63 +180,58 @@ export function SettingsScreen() {
           const text = await file.text()
           const data = JSON.parse(text)
           if (!data || typeof data !== 'object') {
-            Alert.alert('导入失败', '备份文件格式不正确')
+            showToast('备份文件格式不正确', 'error')
             return
           }
           const res = await importBackup({
             config: data.config,
             records: data.records,
           })
-          Alert.alert(
-            '导入成功 ✓',
-            `已成功导入 ${res.importedRecordsCount} 条考勤记录${res.importedConfig ? '，配置已同步更新' : ''}`
+          showToast(
+            `已导入 ${res.importedRecordsCount} 条考勤记录${res.importedConfig ? '，配置已同步' : ''}`,
+            'success'
           )
         } catch (err: any) {
-          Alert.alert('导入失败', err?.message || '无法解析备份文件')
+          showToast(err?.message || '无法解析备份文件', 'error')
         }
       }
       input.click()
       return
     }
 
-    Alert.alert('确认导入', '导入将把备份文件合并写入 GitLite 数据库并更新配置，是否继续？', [
-      { text: '取消', style: 'cancel' },
-      {
-        text: '确定导入',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            const fileUri = documentDirectory + 'workhour-backup.json'
-            const fileInfo = await getInfoAsync(fileUri)
-            if (!fileInfo.exists) {
-              Alert.alert('导入失败', '未在本地找到备份文件 workhour-backup.json，请先导出或放置备份文件。')
-              return
-            }
+    setImportConfirmVisible(true)
+  }
 
-            const json = await readAsStringAsync(fileUri)
-            const data = JSON.parse(json)
+  const handleConfirmNativeImport = async () => {
+    setImportConfirmVisible(false)
+    try {
+      const fileUri = documentDirectory + 'workhour-backup.json'
+      const fileInfo = await getInfoAsync(fileUri)
+      if (!fileInfo.exists) {
+        showToast('未在本地找到备份文件 workhour-backup.json', 'error')
+        return
+      }
 
-            if (!data || (typeof data !== 'object')) {
-              Alert.alert('导入失败', '备份文件格式不正确')
-              return
-            }
+      const json = await readAsStringAsync(fileUri)
+      const data = JSON.parse(json)
 
-            // 严格兼容历史格式与新格式
-            const res = await importBackup({
-              config: data.config,
-              records: data.records,
-            })
+      if (!data || typeof data !== 'object') {
+        showToast('备份文件格式不正确', 'error')
+        return
+      }
 
-            Alert.alert(
-              '导入成功 ✓',
-              `已成功导入 ${res.importedRecordsCount} 条考勤记录${res.importedConfig ? '，配置已同步更新' : ''}`
-            )
-          } catch (error: any) {
-            Alert.alert('导入失败', error?.message || '无法解析备份文件')
-          }
-        },
-      },
-    ])
+      const res = await importBackup({
+        config: data.config,
+        records: data.records,
+      })
+
+      showToast(
+        `已成功导入 ${res.importedRecordsCount} 条考勤记录${res.importedConfig ? '，配置已同步' : ''}`,
+        'success'
+      )
+    } catch (error: any) {
+      showToast(error?.message || '无法解析备份文件', 'error')
+    }
   }
 
   return (
@@ -255,7 +257,11 @@ export function SettingsScreen() {
               </Text>
             </View>
             <Text style={styles.dbStatusBadge}>
-              {dbStatus.provider === 'github' ? 'GitHub 云端分支' : dbStatus.provider}
+              {dbStatus.provider === 'github'
+                ? '🐙 GitHub 云端'
+                : dbStatus.provider === 'gitee'
+                ? '🔴 Gitee 云端'
+                : '💾 本地离线'}
             </Text>
           </View>
 
@@ -279,6 +285,7 @@ export function SettingsScreen() {
               style={styles.syncBtn}
               onPress={handleManualFlush}
               disabled={isFlushing}
+              activeOpacity={0.7}
             >
               {isFlushing ? (
                 <ActivityIndicator size="small" color="#FFFFFF" />
@@ -291,6 +298,7 @@ export function SettingsScreen() {
               style={[styles.syncBtn, styles.syncBtnSecondary]}
               onPress={handleManualPull}
               disabled={isPulling}
+              activeOpacity={0.7}
             >
               {isPulling ? (
                 <ActivityIndicator size="small" color={COLORS.textPrimary} />
@@ -300,8 +308,12 @@ export function SettingsScreen() {
             </TouchableOpacity>
           </View>
 
-          <TouchableOpacity style={styles.switchPlatformBtn} onPress={handleSwitchPlatform}>
-            <Text style={styles.switchPlatformBtnText}>🔑 切换平台 (GitHub / Gitee)</Text>
+          <TouchableOpacity
+            style={styles.switchPlatformBtn}
+            onPress={() => setAuthModalVisible(true)}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.switchPlatformBtnText}>🔑 配置云端同步 / 切换平台 (GitHub / Gitee)</Text>
           </TouchableOpacity>
         </View>
 
@@ -417,15 +429,48 @@ export function SettingsScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionLabel}>数据管理</Text>
 
-          <TouchableOpacity style={styles.dataButton} onPress={handleExport}>
+          <TouchableOpacity style={styles.dataButton} onPress={handleExport} activeOpacity={0.7}>
             <Text style={styles.dataButtonText}>导出数据 (保留历史结构)</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity style={[styles.dataButton, styles.dataButtonLast]} onPress={handleImport}>
-            <Text style={[styles.dataButtonText, { color: COLORS.warning }]}>导入数据 (兼容历史备份)</Text>
+          <TouchableOpacity
+            style={[styles.dataButton, styles.dataButtonLast]}
+            onPress={handleTriggerImport}
+            activeOpacity={0.7}
+          >
+            <Text style={[styles.dataButtonText, { color: COLORS.warning }]}>
+              导入数据 (兼容历史备份)
+            </Text>
           </TouchableOpacity>
         </View>
       </ScrollView>
+
+      {/* 平台鉴权与连接配置弹窗 */}
+      <GitLiteAuthModal
+        visible={authModalVisible}
+        currentStatus={dbStatus}
+        onClose={() => setAuthModalVisible(false)}
+        onConnect={handleConnectProvider}
+      />
+
+      {/* 确认导入弹窗 */}
+      <ConfirmModal
+        visible={importConfirmVisible}
+        title="确认导入备份"
+        message="导入将把备份文件合并写入 GitLite 数据库并更新配置，是否继续？"
+        confirmText="确定导入"
+        confirmStyle="danger"
+        onConfirm={handleConfirmNativeImport}
+        onCancel={() => setImportConfirmVisible(false)}
+      />
+
+      {/* 全局浮动反馈 Toast */}
+      <Toast
+        visible={toast.visible}
+        message={toast.message}
+        type={toast.type}
+        onHide={() => setToast((prev) => ({ ...prev, visible: false }))}
+      />
     </SafeAreaView>
   )
 }
@@ -511,7 +556,7 @@ const styles = StyleSheet.create({
   },
   dbStatusBadge: {
     fontSize: 12,
-    fontWeight: '500',
+    fontWeight: '600',
     color: COLORS.success,
     backgroundColor: '#E8F5E9',
     paddingHorizontal: 8,
@@ -577,7 +622,7 @@ const styles = StyleSheet.create({
   switchPlatformBtnText: {
     fontSize: 13,
     fontWeight: '600',
-    color: '#007AFF',
+    color: '#0284C7',
   },
   row: {
     flexDirection: 'row',

@@ -5,6 +5,7 @@ import { useAppStore } from '../stores/useAppStore'
 import { CalendarGrid } from '../components/CalendarGrid'
 import { Heatmap } from '../components/Heatmap'
 import { TimePickerModal } from '../components/TimePickerModal'
+import { Toast, ToastType } from '../components/Toast'
 import { COLORS } from '../constants'
 import { useLiveTime } from '../utils/useLiveTime'
 import dayjs from 'dayjs'
@@ -15,6 +16,16 @@ export function CalendarScreen() {
   const [currentMonth, setCurrentMonth] = useState(() => dayjs())
   const [selectedDateId, setSelectedDateId] = useState<string | null>(null)
   const [pickerVisible, setPickerVisible] = useState(false)
+
+  const [toast, setToast] = useState<{ visible: boolean; message: string; type: ToastType }>({
+    visible: false,
+    message: '',
+    type: 'info',
+  })
+
+  const showToast = (message: string, type: ToastType = 'info') => {
+    setToast({ visible: true, message, type })
+  }
 
   const handlePrevMonth = () => {
     setCurrentMonth(currentMonth.subtract(1, 'month'))
@@ -32,6 +43,7 @@ export function CalendarScreen() {
   const handleTimeConfirm = (clockOutTime: string) => {
     if (selectedDateId) {
       setRecordTime(selectedDateId, clockOutTime)
+      showToast(`${selectedDateId} 下班时间已更新为 ${clockOutTime}`, 'success')
     }
     setPickerVisible(false)
     setSelectedDateId(null)
@@ -40,6 +52,12 @@ export function CalendarScreen() {
   const handleMarkLeave = () => {
     if (selectedDateId) {
       toggleLeave(selectedDateId)
+      const existing = records[selectedDateId]
+      if (existing?.isLeave) {
+        showToast(`已取消 ${selectedDateId} 的请假标记`, 'info')
+      } else {
+        showToast(`已将 ${selectedDateId} 标记为请假`, 'success')
+      }
     }
     setPickerVisible(false)
     setSelectedDateId(null)
@@ -56,11 +74,11 @@ export function CalendarScreen() {
     <SafeAreaView style={styles.container}>
       <ScrollView contentContainerStyle={styles.scroll}>
         <View style={styles.monthHeader}>
-          <TouchableOpacity onPress={handlePrevMonth} style={styles.arrowButton}>
+          <TouchableOpacity onPress={handlePrevMonth} style={styles.arrowButton} activeOpacity={0.7}>
             <Text style={styles.arrowText}>‹</Text>
           </TouchableOpacity>
           <Text style={styles.monthTitle}>{currentMonth.format('YYYY年M月')}</Text>
-          <TouchableOpacity onPress={handleNextMonth} style={styles.arrowButton}>
+          <TouchableOpacity onPress={handleNextMonth} style={styles.arrowButton} activeOpacity={0.7}>
             <Text style={styles.arrowText}>›</Text>
           </TouchableOpacity>
         </View>
@@ -93,6 +111,13 @@ export function CalendarScreen() {
         onConfirm={handleTimeConfirm}
         onMarkLeave={handleMarkLeave}
         onClose={handleClose}
+      />
+
+      <Toast
+        visible={toast.visible}
+        message={toast.message}
+        type={toast.type}
+        onHide={() => setToast((prev) => ({ ...prev, visible: false }))}
       />
     </SafeAreaView>
   )
