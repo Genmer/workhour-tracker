@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { StyleSheet, View, ScrollView, Text, TextInput, TouchableOpacity, Alert, ActivityIndicator } from 'react-native'
+import { StyleSheet, View, ScrollView, Text, TextInput, TouchableOpacity, Alert, ActivityIndicator, Platform } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { useAppStore } from '../stores/useAppStore'
 import { COLORS } from '../constants'
@@ -141,6 +141,17 @@ export function SettingsScreen() {
     try {
       const data = await exportBackup()
       const json = JSON.stringify(data, null, 2)
+      if (Platform.OS === 'web') {
+        const blob = new Blob([json], { type: 'application/json' })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = 'workhour-backup.json'
+        a.click()
+        URL.revokeObjectURL(url)
+        Alert.alert('数据已导出 ✓', `已导出 ${Object.keys(data.records).length} 条考勤记录`)
+        return
+      }
       const fileUri = documentDirectory + 'workhour-backup.json'
       await writeAsStringAsync(fileUri, json)
       await shareAsync(fileUri)
@@ -151,6 +162,36 @@ export function SettingsScreen() {
   }
 
   const handleImport = async () => {
+    if (Platform.OS === 'web') {
+      const input = document.createElement('input')
+      input.type = 'file'
+      input.accept = '.json'
+      input.onchange = async (e: any) => {
+        const file = e.target.files?.[0]
+        if (!file) return
+        try {
+          const text = await file.text()
+          const data = JSON.parse(text)
+          if (!data || typeof data !== 'object') {
+            Alert.alert('导入失败', '备份文件格式不正确')
+            return
+          }
+          const res = await importBackup({
+            config: data.config,
+            records: data.records,
+          })
+          Alert.alert(
+            '导入成功 ✓',
+            `已成功导入 ${res.importedRecordsCount} 条考勤记录${res.importedConfig ? '，配置已同步更新' : ''}`
+          )
+        } catch (err: any) {
+          Alert.alert('导入失败', err?.message || '无法解析备份文件')
+        }
+      }
+      input.click()
+      return
+    }
+
     Alert.alert('确认导入', '导入将把备份文件合并写入 GitLite 数据库并更新配置，是否继续？', [
       { text: '取消', style: 'cancel' },
       {
