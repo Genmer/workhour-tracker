@@ -1,0 +1,50 @@
+schema: spec-driven
+
+context: |
+  ## 项目概述
+  WorkHourTracker（工时追踪器）- 一款移动端考勤打卡应用
+  
+  ## 技术栈
+  - 框架: Expo SDK 54 + React Native 0.81
+  - 语言: TypeScript 5.9
+  - 状态管理: Zustand 5.0
+  - 本地存储: react-native-mmkv (移动端) / localStorage (Web)
+  - 日期处理: dayjs
+  - UI: 自定义组件，米家风格设计
+  
+  ## 项目结构
+  ```
+  src/
+  ├── components/     # UI组件
+  ├── screens/        # 页面
+  ├── stores/         # 状态管理
+  ├── types/          # 类型定义
+  ├── constants/      # 常量
+  └── utils/          # 工具函数
+  ```
+  
+  ## 设计规范
+  - 风格: 米家风格，简洁清爽
+  - 主色调: 绿色(#34C759)、橙色(#FF9F0A)
+  - 背景: 浅灰(#F5F5F7)
+  
+  ## 核心功能
+  - 下班打卡记录
+  - 工时统计（日/周/月）
+  - 日历视图 + 热力图
+  - 大小周切换
+  - 数据导入导出
+
+rules:
+  proposal:
+    - 使用中文撰写
+    - 包含明确的目标和非目标
+    - 说明用户价值
+  design:
+    - 包含架构图或流程图
+    - 说明数据流向
+    - 列出关键组件
+  tasks:
+    - 每个任务控制在2小时内
+    - 明确验收标准
+    - 按依赖顺序排列

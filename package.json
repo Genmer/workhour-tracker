@@ -1,0 +1,36 @@
+{
+  "name": "workhour-tracker",
+  "version": "1.0.2",
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web",
+    "build:web": "expo export -p web",
+    "deploy": "expo export -p web && gh-pages -d dist"
+  },
+  "dependencies": {
+    "@gitlite/react": "^0.1.0",
+    "@gitlite/sdk": "^0.1.0",
+    "dayjs": "^1.11.20",
+    "expo": "~54.0.33",
+    "expo-file-system": "~19.0.22",
+    "expo-notifications": "~0.32.17",
+    "expo-sharing": "~14.0.8",
+    "expo-status-bar": "~3.0.9",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-mmkv": "^4.3.1",
+    "react-native-safe-area-context": "~5.6.0",
+    "react-native-web": "^0.21.0",
+    "zustand": "^5.0.13"
+  },
+  "devDependencies": {
+    "@types/react": "~19.1.0",
+    "gh-pages": "^6.3.0",
+    "typescript": "~5.9.2"
+  },
+  "private": true
+}
