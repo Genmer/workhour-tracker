@@ -6,9 +6,15 @@ import {
   type Collection,
   type RuntimeAdapter,
   type GitProvider,
+  type HistoryEntry,
+  type HistoryDetail,
+  type RestoreResult,
 } from '@gitlite/core'
 import { AppConfig, WorkRecord } from '../types'
 import { DEFAULT_CONFIG } from '../constants'
+
+/** 透传 GitLite 历史相关类型，供 store 与 UI 层复用（避免多处直连 @gitlite/core） */
+export type { HistoryEntry, HistoryDetail, RestoreResult } from '@gitlite/core'
 
 /**
  * 数据库文档类型定义
@@ -226,7 +232,8 @@ let configCol: Collection<DbConfigDoc> | null = null
 let recordsCol: Collection<DbRecordDoc> | null = null
 let initPromise: Promise<GitLiteClient> | null = null
 
-export type DbStatusListener = (status: {
+/** 数据库状态快照：本地连接字段 + GitLite 0.4.0 syncStatus 扩展字段（均为可选，向后兼容） */
+export interface DbStatus {
   isReady: boolean
   provider: string
   database: string
@@ -235,18 +242,46 @@ export type DbStatusListener = (status: {
   lastSyncAt?: string | null
   error?: string | null
   isSyncing?: boolean
-}) => void
+  /** 引擎状态机：connecting/ready/syncing/synced/offline/error */
+  state?: string
+  /** 连接维度：online=已连云端 / offline=离线本地 / unknown=检测中 */
+  connection?: 'online' | 'offline' | 'unknown'
+  /** normal=云端模式 / fully-local=纯本地模式 */
+  mode?: 'normal' | 'fully-local'
+  lastError?: string | null
+  conflicts?: number
+  remoteHeadOid?: string | null
+}
+
+export type DbStatusListener = (status: DbStatus) => void
 
 const statusListeners = new Set<DbStatusListener>()
-let currentDbStatus = {
+let currentDbStatus: DbStatus = {
   isReady: false,
   provider: 'github',
   database: 'workhour-tracker',
   online: false,
   pendingOps: 0,
-  lastSyncAt: null as string | null,
-  error: null as string | null,
+  lastSyncAt: null,
+  error: null,
   isSyncing: false,
+}
+
+/** 将引擎 syncStatus() 最新字段合并进本地状态（保留 provider/database/isReady 等本地字段） */
+function mergeSyncStatus(db: GitLiteClient) {
+  const status = db.syncStatus()
+  currentDbStatus = {
+    ...currentDbStatus,
+    online: status.online,
+    pendingOps: status.pendingOps,
+    lastSyncAt: status.lastSyncAt,
+    state: status.state,
+    connection: status.connection,
+    mode: status.mode,
+    lastError: status.lastError,
+    conflicts: status.conflicts,
+    remoteHeadOid: status.remoteHeadOid,
+  }
 }
 
 function notifyStatusChange() {
@@ -348,6 +383,7 @@ export async function getOrInitGitLiteDB(options?: {
         ref: { owner, repo },
         database,
         allowForeignRepo: true,
+        onProgress: (step, detail) => console.log('[GitLite] connect:', step, detail ?? ''),
       })
 
       dbInstance = client
@@ -367,6 +403,12 @@ export async function getOrInitGitLiteDB(options?: {
         lastSyncAt: syncStatus.lastSyncAt,
         error: null,
         isSyncing: false,
+        state: syncStatus.state,
+        connection: syncStatus.connection,
+        mode: syncStatus.mode,
+        lastError: syncStatus.lastError,
+        conflicts: syncStatus.conflicts,
+        remoteHeadOid: syncStatus.remoteHeadOid,
       }
 
       // 监听同步事件
@@ -378,6 +420,12 @@ export async function getOrInitGitLiteDB(options?: {
           online: true,
           pendingOps: updated.pendingOps,
           lastSyncAt: updated.lastSyncAt || new Date().toLocaleTimeString(),
+          state: updated.state,
+          connection: updated.connection,
+          mode: updated.mode,
+          lastError: updated.lastError,
+          conflicts: updated.conflicts,
+          remoteHeadOid: updated.remoteHeadOid,
           isSyncing: false,
         }
         notifyStatusChange()
@@ -385,6 +433,12 @@ export async function getOrInitGitLiteDB(options?: {
 
       client.on('sync:conflict', (e: any) => {
         console.warn('[GitLite] 检测到多端变更冲突，引擎已执行三路合并:', e)
+      })
+
+      // GitLite 0.4.0：状态机变化实时推送，收到后整体刷新同步维度字段
+      client.on('status:change', () => {
+        mergeSyncStatus(client)
+        notifyStatusChange()
       })
 
       notifyStatusChange()
@@ -416,6 +470,8 @@ export async function getOrInitGitLiteDB(options?: {
         lastSyncAt: null,
         error: err?.message || '离线本地模式',
         isSyncing: false,
+        connection: 'offline',
+        mode: 'fully-local',
       }
       notifyStatusChange()
       if (options?.force) {
@@ -440,12 +496,10 @@ export async function syncFlushNow(): Promise<void> {
     if (db && db.sync) {
       await db.sync.flush()
     }
-    const status = db.syncStatus()
+    mergeSyncStatus(db)
     currentDbStatus = {
       ...currentDbStatus,
-      online: status.online,
-      pendingOps: status.pendingOps,
-      lastSyncAt: status.lastSyncAt || new Date().toLocaleTimeString(),
+      lastSyncAt: currentDbStatus.lastSyncAt || new Date().toLocaleTimeString(),
       isSyncing: false,
     }
     notifyStatusChange()
@@ -468,12 +522,10 @@ export async function syncPullNow(): Promise<void> {
     if (db && db.sync) {
       await db.sync.pull()
     }
-    const status = db.syncStatus()
+    mergeSyncStatus(db)
     currentDbStatus = {
       ...currentDbStatus,
-      online: status.online,
-      pendingOps: status.pendingOps,
-      lastSyncAt: status.lastSyncAt || new Date().toLocaleTimeString(),
+      lastSyncAt: currentDbStatus.lastSyncAt || new Date().toLocaleTimeString(),
       isSyncing: false,
     }
     notifyStatusChange()
@@ -482,6 +534,64 @@ export async function syncPullNow(): Promise<void> {
     notifyStatusChange()
     throw e
   }
+}
+
+/**
+ * GitLite 0.4.0 双向同步：先拉取远端最新变更并三路合并，再推送本地增量
+ */
+export async function syncNowBothWays(): Promise<{ pushed: boolean; pulled: boolean }> {
+  const db = await getOrInitGitLiteDB()
+  currentDbStatus.isSyncing = true
+  notifyStatusChange()
+
+  try {
+    const result = await db.syncNow()
+    mergeSyncStatus(db)
+    currentDbStatus = {
+      ...currentDbStatus,
+      lastSyncAt: currentDbStatus.lastSyncAt || new Date().toLocaleTimeString(),
+      isSyncing: false,
+    }
+    notifyStatusChange()
+    return result
+  } catch (e: any) {
+    currentDbStatus.isSyncing = false
+    notifyStatusChange()
+    throw e
+  }
+}
+
+/**
+ * 分页获取同步历史列表（GitLite 0.4.0 HistoryService）
+ * 列表场景关闭逐条文件数/文档统计（缺省开启时每条额外消耗 3~5 次远端调用，
+ * 极易打满 GitLiteClient 缺省 60 次/小时配额，导致 sync.flush 抛 QuotaExceededError）；
+ * 统计信息由用户点开详情时经 fetchHistoryDetail 按需获取
+ */
+export async function fetchHistoryList(opts?: {
+  limit?: number
+  page?: number
+}): Promise<HistoryEntry[]> {
+  const db = await getOrInitGitLiteDB()
+  return db.history.list({ ...opts, fileCounts: false, docCounts: false })
+}
+
+/**
+ * 获取某次提交的详情（文件清单 + 文档级变更明细）
+ */
+export async function fetchHistoryDetail(oid: string): Promise<HistoryDetail> {
+  const db = await getOrInitGitLiteDB()
+  return db.history.detail(oid)
+}
+
+/**
+ * 合并式恢复到指定快照：只补缺失/更旧文档，不删除当前已有数据
+ */
+export async function restoreHistorySnapshot(
+  oid: string,
+  opts?: { dryRun?: boolean; force?: boolean }
+): Promise<RestoreResult> {
+  const db = await getOrInitGitLiteDB()
+  return db.history.restore(oid, opts)
 }
 
 /**

@@ -5,6 +5,7 @@ import { StatusBar } from 'expo-status-bar'
 import { TabBar } from './src/components/TabBar'
 import { DashboardScreen } from './src/screens/DashboardScreen'
 import { CalendarScreen } from './src/screens/CalendarScreen'
+import { HistoryScreen } from './src/screens/HistoryScreen'
 import { SettingsScreen } from './src/screens/SettingsScreen'
 import { COLORS } from './src/constants'
 import { useAppStore } from './src/stores/useAppStore'
@@ -23,6 +24,8 @@ export default function App() {
         return <DashboardScreen />
       case 'calendar':
         return <CalendarScreen />
+      case 'history':
+        return <HistoryScreen />
       case 'settings':
         return <SettingsScreen />
       default:

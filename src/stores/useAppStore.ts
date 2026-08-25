@@ -16,6 +16,9 @@ import {
   subscribeDbStatus,
   syncFlushNow,
   syncPullNow,
+  syncNowBothWays,
+  restoreHistorySnapshot,
+  type RestoreResult,
 } from '../services/gitlite'
 import dayjs from 'dayjs'
 import { Platform } from 'react-native'
@@ -64,6 +67,15 @@ export interface GitLiteStatus {
   lastSyncAt?: string | null
   error?: string | null
   isSyncing?: boolean
+  /** 引擎状态机：connecting/ready/syncing/synced/offline/error */
+  state?: string
+  /** 连接维度：online=已连云端 / offline=离线本地 / unknown=检测中 */
+  connection?: 'online' | 'offline' | 'unknown'
+  /** normal=云端模式 / fully-local=纯本地模式 */
+  mode?: 'normal' | 'fully-local'
+  lastError?: string | null
+  conflicts?: number
+  remoteHeadOid?: string | null
 }
 
 interface AppState {
@@ -76,6 +88,8 @@ interface AppState {
   initDatabase: () => Promise<void>
   syncToCloud: () => Promise<void>
   pullFromCloud: () => Promise<void>
+  syncNow: () => Promise<void>
+  restoreSnapshot: (oid: string) => Promise<RestoreResult>
   reconnectProvider: (provider: 'github' | 'gitee' | 'memory', token?: string) => Promise<void>
 
   updateConfig: (config: Partial<AppConfig>) => void
@@ -169,6 +183,28 @@ export const useAppStore = create<AppState>()(
           config: freshConfig ? { ...state.config, ...freshConfig } : state.config,
           records: freshRecords,
         }))
+      },
+
+      syncNow: async () => {
+        await syncNowBothWays()
+        const freshRecords = await getAllRecordsFromDb()
+        const freshConfig = await getAppConfigFromDb()
+        set((state) => ({
+          config: freshConfig ? { ...state.config, ...freshConfig } : state.config,
+          records: freshRecords,
+        }))
+      },
+
+      restoreSnapshot: async (oid) => {
+        // 合并式恢复（非 dryRun）：只补缺失/更旧文档，不删除当前已有数据
+        const result = await restoreHistorySnapshot(oid)
+        const freshRecords = await getAllRecordsFromDb()
+        const freshConfig = await getAppConfigFromDb()
+        set((state) => ({
+          config: freshConfig ? { ...state.config, ...freshConfig } : state.config,
+          records: freshRecords,
+        }))
+        return result
       },
 
       reconnectProvider: async (provider, token) => {

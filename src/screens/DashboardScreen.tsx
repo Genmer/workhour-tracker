@@ -48,6 +48,12 @@ export function DashboardScreen() {
   const isClocked = todayRecord?.clockOutTime != null
   const isLeave = todayRecord?.isLeave ?? false
 
+  // 优先使用 GitLite 0.4.0 连接维度判定云端在线（未上报时回退 provider 判定）
+  const isCloudOnline =
+    dbStatus.connection != null
+      ? dbStatus.connection === 'online'
+      : dbStatus.provider !== 'memory'
+
   const allRecords = useMemo(() => Object.values(records), [records])
 
   const weeklyStats = useMemo(() => {
@@ -180,10 +186,10 @@ export function DashboardScreen() {
                 {dbStatus.pendingOps && dbStatus.pendingOps > 0
                   ? `☁️ ${dbStatus.pendingOps} 条待同步 · 点击配置`
                   : `⚡ GitLite · ${
-                      dbStatus.provider === 'github'
-                        ? 'GitHub'
-                        : dbStatus.provider === 'gitee'
-                        ? 'Gitee'
+                      isCloudOnline
+                        ? dbStatus.provider === 'gitee'
+                          ? 'Gitee'
+                          : 'GitHub'
                         : '本地离线'
                     } 已就绪`}
               </Text>

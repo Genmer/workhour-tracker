@@ -9,6 +9,7 @@ interface TabBarProps {
 const tabs = [
   { id: 'dashboard', label: '首页', icon: '🏠' },
   { id: 'calendar', label: '日历', icon: '📅' },
+  { id: 'history', label: '历史', icon: '📜' },
   { id: 'settings', label: '设置', icon: '⚙️' },
 ]
 

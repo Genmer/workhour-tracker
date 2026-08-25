@@ -30,6 +30,7 @@ export function SettingsScreen() {
     exportBackup,
     syncToCloud,
     pullFromCloud,
+    syncNow,
     reconnectProvider,
   } = useAppStore()
 
@@ -40,6 +41,7 @@ export function SettingsScreen() {
   const [overtimeEndInput, setOvertimeEndInput] = useState(config.overtimeEndTime)
   const [isFlushing, setIsFlushing] = useState(false)
   const [isPulling, setIsPulling] = useState(false)
+  const [isSyncingNow, setIsSyncingNow] = useState(false)
 
   // 弹窗与反馈状态
   const [authModalVisible, setAuthModalVisible] = useState(false)
@@ -136,6 +138,21 @@ export function SettingsScreen() {
       showToast(e?.message || '当前处于离线模式或网络未连接', 'error')
     } finally {
       setIsPulling(false)
+    }
+  }
+
+  const handleSyncBothWays = async () => {
+    if (isSyncingNow) return
+    setIsSyncingNow(true)
+    showToast('正在执行双向同步（拉取 + 推送）...', 'info')
+
+    try {
+      await syncNow()
+      showToast('双向同步完成，云端与本地已一致！', 'success')
+    } catch (e: any) {
+      showToast(e?.message || '同步失败，请检查网络连接', 'error')
+    } finally {
+      setIsSyncingNow(false)
     }
   }
 
@@ -265,6 +282,34 @@ export function SettingsScreen() {
             </Text>
           </View>
 
+          {/* GitLite 0.4.0 连接维度：online=已连云端 / offline=离线本地 / unknown=检测中 */}
+          <View style={styles.infoRow}>
+            <Text style={styles.infoLabel}>云端连接</Text>
+            <Text
+              style={[
+                styles.infoValue,
+                dbStatus.connection === 'online' && { color: COLORS.success },
+                (dbStatus.connection == null || dbStatus.connection === 'unknown') && {
+                  color: COLORS.textSecondary,
+                },
+              ]}
+            >
+              {dbStatus.connection === 'online'
+                ? '已连接'
+                : dbStatus.connection === 'offline'
+                ? '离线本地'
+                : '检测中'}
+            </Text>
+          </View>
+
+          {dbStatus.lastError ? (
+            <View style={styles.lastErrorRow}>
+              <Text style={styles.lastErrorText} numberOfLines={2}>
+                {dbStatus.lastError}
+              </Text>
+            </View>
+          ) : null}
+
           <View style={styles.infoRow}>
             <Text style={styles.infoLabel}>数据库分支</Text>
             <Text style={styles.infoValue}>gitlite/{dbStatus.database}</Text>
@@ -290,7 +335,7 @@ export function SettingsScreen() {
               {isFlushing ? (
                 <ActivityIndicator size="small" color="#FFFFFF" />
               ) : (
-                <Text style={styles.syncBtnText}>⚡ 立即推送到云端</Text>
+                <Text style={styles.syncBtnText}>⚡立即推送</Text>
               )}
             </TouchableOpacity>
 
@@ -303,7 +348,20 @@ export function SettingsScreen() {
               {isPulling ? (
                 <ActivityIndicator size="small" color={COLORS.textPrimary} />
               ) : (
-                <Text style={styles.syncBtnTextSecondary}>🔄 从云端拉取</Text>
+                <Text style={styles.syncBtnTextSecondary}>🔄云端拉取</Text>
+              )}
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.syncBtn, styles.syncBtnSecondary]}
+              onPress={handleSyncBothWays}
+              disabled={isSyncingNow}
+              activeOpacity={0.7}
+            >
+              {isSyncingNow ? (
+                <ActivityIndicator size="small" color={COLORS.textPrimary} />
+              ) : (
+                <Text style={styles.syncBtnTextSecondary}>☁️双向同步</Text>
               )}
             </TouchableOpacity>
           </View>
@@ -603,14 +661,24 @@ const styles = StyleSheet.create({
     borderColor: COLORS.separator,
   },
   syncBtnText: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '600',
     color: '#FFFFFF',
   },
   syncBtnTextSecondary: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '600',
     color: COLORS.textPrimary,
+  },
+  lastErrorRow: {
+    paddingHorizontal: 16,
+    paddingTop: 6,
+    paddingBottom: 8,
+  },
+  lastErrorText: {
+    fontSize: 11,
+    color: COLORS.textSecondary,
+    lineHeight: 15,
   },
   switchPlatformBtn: {
     paddingVertical: 12,
