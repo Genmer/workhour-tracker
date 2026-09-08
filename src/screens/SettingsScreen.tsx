@@ -18,6 +18,7 @@ import { shareAsync } from 'expo-sharing'
 import { Toast, ToastType } from '../components/Toast'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { GitLiteAuthModal } from '../components/GitLiteAuthModal'
+import { RepoAlignSection } from '../components/RepoAlignSection'
 
 export function SettingsScreen() {
   const {
@@ -365,6 +366,12 @@ export function SettingsScreen() {
               )}
             </TouchableOpacity>
           </View>
+
+          {/* 仓库对齐：把另一平台的数据仓库收敛镜像为当前平台状态 */}
+          <RepoAlignSection
+            dbStatus={dbStatus}
+            onNeedAuth={() => setAuthModalVisible(true)}
+          />
 
           <TouchableOpacity
             style={styles.switchPlatformBtn}

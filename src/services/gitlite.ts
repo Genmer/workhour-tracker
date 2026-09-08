@@ -10,11 +10,15 @@ import {
   type HistoryDetail,
   type RestoreResult,
 } from '@gitlite/core'
+import { Platform } from 'react-native'
+import type { MirrorResult } from '@gitlite/sdk/browser'
 import { AppConfig, WorkRecord } from '../types'
 import { DEFAULT_CONFIG } from '../constants'
 
 /** 透传 GitLite 历史相关类型，供 store 与 UI 层复用（避免多处直连 @gitlite/core） */
 export type { HistoryEntry, HistoryDetail, RestoreResult } from '@gitlite/core'
+/** 透传 SDK 镜像结果类型（仅类型引用，运行时经 @gitlite/sdk/browser 动态加载） */
+export type { MirrorResult } from '@gitlite/sdk/browser'
 
 /**
  * 数据库文档类型定义
@@ -131,47 +135,80 @@ function sha1(str: string): string {
   return hex(a) + hex(b) + hex(c) + hex(d) + hex(e)
 }
 
+/** 原生端 MMKV 的最小键值接口（仅用到的子集，避免静态引入 react-native-mmkv 类型） */
+interface MinimalKVStorage {
+  getString(key: string): string | undefined
+  set(key: string, value: string): void
+  remove(key: string): void
+}
+
 /**
  * 跨端通用的浏览器/移动端安全运行时适配器
+ * web 分支继续走 localStorage（键名零改动，兼容老数据）；
+ * 原生分支 fs / credential 改走 MMKV 持久化（修复 token 无法持久化的问题），键名与 web 完全一致
  */
 export function createUniversalRuntime(): RuntimeAdapter {
+  const isWeb = Platform.OS === 'web'
   const memFs = new Map<string, string>()
+
+  // 原生端条件 require MMKV（照抄 useAppStore.createStorage 的模式，web 包不会加载原生模块）
+  let mmkv: MinimalKVStorage | null = null
+  if (!isWeb) {
+    const { createMMKV } = require('react-native-mmkv')
+    mmkv = createMMKV()
+  }
+
+  // 统一键值读写：原生走 MMKV，web 走 localStorage，键名格式两端完全一致
+  const readRaw = (key: string): string | null => {
+    if (!isWeb && mmkv) {
+      const v = mmkv.getString(key)
+      return v ?? null
+    }
+    return typeof localStorage !== 'undefined' ? localStorage.getItem(key) : null
+  }
+  const writeRaw = (key: string, value: string) => {
+    if (!isWeb && mmkv) {
+      mmkv.set(key, value)
+      return
+    }
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem(key, value)
+      } catch {}
+    }
+  }
+  const removeRaw = (key: string) => {
+    if (!isWeb && mmkv) {
+      mmkv.remove(key)
+      return
+    }
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(key)
+    }
+  }
 
   const browserFs = {
     async readFile(file: string) {
-      const v =
-        memFs.get(file) ??
-        (typeof localStorage !== 'undefined' ? localStorage.getItem(`gitlite:fs:${file}`) : null)
+      const v = memFs.get(file) ?? readRaw(`gitlite:fs:${file}`)
       if (v == null) throw new Error(`ENOENT: ${file}`)
       return v
     },
     async writeFile(file: string, data: string) {
       memFs.set(file, data)
-      if (typeof localStorage !== 'undefined') {
-        try {
-          localStorage.setItem(`gitlite:fs:${file}`, data)
-        } catch {}
-      }
+      writeRaw(`gitlite:fs:${file}`, data)
     },
     async appendFile(file: string, data: string) {
-      const cur =
-        memFs.get(file) ??
-        (typeof localStorage !== 'undefined' ? localStorage.getItem(`gitlite:fs:${file}`) : null) ??
-        ''
+      const cur = memFs.get(file) ?? readRaw(`gitlite:fs:${file}`) ?? ''
       const updated = cur + data
       memFs.set(file, updated)
-      if (typeof localStorage !== 'undefined') {
-        try {
-          localStorage.setItem(`gitlite:fs:${file}`, updated)
-        } catch {}
-      }
+      writeRaw(`gitlite:fs:${file}`, updated)
     },
     async exists(file: string) {
       if (memFs.has(file)) return true
-      return typeof localStorage !== 'undefined' && localStorage.getItem(`gitlite:fs:${file}`) != null
+      return readRaw(`gitlite:fs:${file}`) != null
     },
     async mkdir(_dir: string) {
-      // 浏览器环境无需实际文件夹
+      // 浏览器 / 原生环境均无需实际文件夹
     },
   }
 
@@ -192,22 +229,13 @@ export function createUniversalRuntime(): RuntimeAdapter {
 
   const browserCredential = {
     async set(key: string, value: string) {
-      if (typeof localStorage !== 'undefined') {
-        try {
-          localStorage.setItem(`gitlite:cred:${key}`, value)
-        } catch {}
-      }
+      writeRaw(`gitlite:cred:${key}`, value)
     },
     async get(key: string) {
-      if (typeof localStorage !== 'undefined') {
-        return localStorage.getItem(`gitlite:cred:${key}`)
-      }
-      return null
+      return readRaw(`gitlite:cred:${key}`)
     },
     async delete(key: string) {
-      if (typeof localStorage !== 'undefined') {
-        localStorage.removeItem(`gitlite:cred:${key}`)
-      }
+      removeRaw(`gitlite:cred:${key}`)
     },
   }
 
@@ -225,6 +253,36 @@ export function createUniversalRuntime(): RuntimeAdapter {
       }
     },
   }
+}
+
+/**
+ * 将 GitLite 错误统一映射为面向用户的中文文案
+ * （覆盖 0.5.1 新增 PublicRepoError / QuotaExceededError；判定用 name / code / message 三重兜底）
+ */
+export function friendlyGitLiteError(err: unknown): string {
+  const e = err as { name?: string; code?: string; message?: string } | null | undefined
+  const name = String(e?.name ?? '')
+  const code = String(e?.code ?? '')
+  const message = String(e?.message ?? '')
+
+  // PublicRepoError：err.name 可能是类名或 'PUBLIC_REPO' 代码
+  if (
+    /PublicRepo|PUBLIC_REPO/i.test(name) ||
+    /PUBLIC_REPO/i.test(code) ||
+    /PublicRepo|PUBLIC_REPO/i.test(message)
+  ) {
+    return '目标仓库是公开的（public），为保护数据安全 GitLite 拒绝写入。请在 GitHub/Gitee 仓库设置中改为 Private 后重试'
+  }
+  if (/QuotaExceeded/i.test(name) || /QuotaExceeded|budget exhausted/i.test(message)) {
+    return '远端调用配额已用尽（每小时刷新），请稍后再试'
+  }
+  if (/NetworkError/i.test(name) || /offline/i.test(message)) {
+    return '当前离线，此操作需要网络连接'
+  }
+  if (/NotFoundError/i.test(name)) {
+    return '该记录已超出可查询范围'
+  }
+  return e?.message || '未知错误'
 }
 
 let dbInstance: GitLiteClient | null = null
@@ -468,7 +526,7 @@ export async function getOrInitGitLiteDB(options?: {
         online: false,
         pendingOps: 0,
         lastSyncAt: null,
-        error: err?.message || '离线本地模式',
+        error: friendlyGitLiteError(err),
         isSyncing: false,
         connection: 'offline',
         mode: 'fully-local',
@@ -559,6 +617,107 @@ export async function syncNowBothWays(): Promise<{ pushed: boolean; pulled: bool
     notifyStatusChange()
     throw e
   }
+}
+
+/**
+ * 对端平台数据分支的远端 HEAD 状态（供仓库对齐预览使用）
+ */
+export type RemoteHeadState =
+  | { state: 'ok'; oid: string; message: string; committedAt: string | null }
+  | { state: 'no-token' }
+  | { state: 'no-branch' }
+  | { state: 'error'; message: string }
+
+/**
+ * 读取指定平台 gitlite-repo 数据分支的远端最新提交（不触碰当前 db 连接）
+ */
+export async function fetchRemoteHeadOf(
+  provider: 'github' | 'gitee'
+): Promise<RemoteHeadState> {
+  const runtime = createUniversalRuntime()
+  const token = (await runtime.credential.get(`gitlite:${provider}:token`)) ?? undefined
+  if (!token) {
+    return { state: 'no-token' }
+  }
+
+  try {
+    // 仓库名与分支命名和 getOrInitGitLiteDB 保持一致
+    const prov =
+      provider === 'github'
+        ? new GitHubProvider(token, runtime.fetch)
+        : new GiteeProvider(token, runtime.fetch)
+    const user = await prov.getUser()
+    const commits = await prov.listCommits(
+      { owner: user.login, repo: 'gitlite-repo' },
+      'gitlite/workhour-tracker',
+      { limit: 1 }
+    )
+    if (!commits || commits.length === 0) {
+      return { state: 'no-branch' }
+    }
+    const head = commits[0]
+    return { state: 'ok', oid: head.oid, message: head.message, committedAt: head.committedAt }
+  } catch (err: any) {
+    // 分支尚未创建 / 仓库不存在（NotFoundError 类）按无分支处理
+    if (err?.name === 'NotFoundError' || /not found/i.test(String(err?.message ?? ''))) {
+      return { state: 'no-branch' }
+    }
+    return { state: 'error', message: friendlyGitLiteError(err) }
+  }
+}
+
+/**
+ * 仓库对齐：以当前连接平台的数据仓库为源，把另一平台的数据仓库收敛镜像为当前状态
+ * （幂等、绝不 force push、只删除目标侧 GitLite 自有且源没有的路径）
+ */
+export async function alignOtherPlatformRepo(): Promise<MirrorResult> {
+  const provider = currentDbStatus.provider
+  if (
+    !dbInstance ||
+    currentDbStatus.mode === 'fully-local' ||
+    (provider !== 'github' && provider !== 'gitee')
+  ) {
+    throw new Error('当前未连接云端仓库，请先在连接配置中连接 GitHub/Gitee')
+  }
+
+  const other = provider === 'github' ? 'gitee' : 'github'
+
+  try {
+    const runtime = createUniversalRuntime()
+    const otherToken = (await runtime.credential.get(`gitlite:${other}:token`)) ?? undefined
+    if (!otherToken) {
+      throw new Error(`未配置 ${other.toUpperCase()} 的访问令牌，请先在连接配置中添加`)
+    }
+
+    // 动态 import：保证主包不拉 @gitlite/sdk，仅在真正对齐时加载浏览器安全子路径
+    const { mirrorTo } = await import('@gitlite/sdk/browser')
+    const result = await mirrorTo(
+      dbInstance,
+      { provider: other, token: otherToken },
+      {
+        runtime,
+        onProgress: (step, detail) => console.log('[GitLite] mirror:', step, detail ?? ''),
+      }
+    )
+
+    mergeSyncStatus(dbInstance)
+    notifyStatusChange()
+    return result
+  } catch (err: any) {
+    throw new Error(friendlyGitLiteError(err))
+  }
+}
+
+/**
+ * 读取凭据库中已保存的各平台访问令牌「是否存在」（绝不返回 token 内容）
+ */
+export async function getSavedTokenInfo(): Promise<{ github: boolean; gitee: boolean }> {
+  const runtime = createUniversalRuntime()
+  const [github, gitee] = await Promise.all([
+    runtime.credential.get('gitlite:github:token'),
+    runtime.credential.get('gitlite:gitee:token'),
+  ])
+  return { github: !!github, gitee: !!gitee }
 }
 
 /**

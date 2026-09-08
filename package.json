@@ -1,6 +1,6 @@
 {
   "name": "workhour-tracker",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "main": "index.ts",
   "scripts": {
     "start": "expo start",
@@ -11,7 +11,8 @@
     "deploy": "expo export -p web && touch dist/.nojekyll && gh-pages -d dist --dotfiles"
   },
   "dependencies": {
-    "@gitlite/core": "^0.4.0",
+    "@gitlite/core": "^0.5.1",
+    "@gitlite/sdk": "^0.5.1",
     "dayjs": "^1.11.20",
     "expo": "~54.0.33",
     "expo-file-system": "~19.0.22",

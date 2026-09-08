@@ -12,6 +12,7 @@ import {
 } from 'react-native'
 import { COLORS } from '../constants'
 import { GitLiteStatus } from '../stores/useAppStore'
+import { getSavedTokenInfo } from '../services/gitlite'
 
 interface GitLiteAuthModalProps {
   visible: boolean
@@ -37,6 +38,9 @@ export function GitLiteAuthModal({
   const [loading, setLoading] = useState(false)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [successMsg, setSuccessMsg] = useState<string | null>(null)
+  // 凭据库中是否已保存对应平台的 Token（只存布尔，绝不持有 token 内容）
+  const [hasSavedGitHub, setHasSavedGitHub] = useState(false)
+  const [hasSavedGitee, setHasSavedGitee] = useState(false)
 
   useEffect(() => {
     if (visible) {
@@ -52,6 +56,30 @@ export function GitLiteAuthModal({
     }
   }, [visible, currentStatus])
 
+  // visible 或 selectedProvider 变化时刷新「已保存 Token」状态
+  useEffect(() => {
+    if (!visible) return
+    let cancelled = false
+    void getSavedTokenInfo()
+      .then((info) => {
+        if (cancelled) return
+        setHasSavedGitHub(info.github)
+        setHasSavedGitee(info.gitee)
+      })
+      .catch(() => {
+        // 凭据读取失败视为未保存，保持输入框必填校验
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [visible, selectedProvider])
+
+  const hasSavedTokenFor = (provider: 'github' | 'gitee' | 'memory'): boolean => {
+    if (provider === 'github') return hasSavedGitHub
+    if (provider === 'gitee') return hasSavedGitee
+    return false
+  }
+
   const handleOpenTokenHelp = () => {
     if (selectedProvider === 'github') {
       void Linking.openURL('https://github.com/settings/tokens/new?description=GitLite-WorkHourTracker&scopes=repo')
@@ -66,7 +94,8 @@ export function GitLiteAuthModal({
     setSuccessMsg(null)
 
     try {
-      if (selectedProvider !== 'memory' && !token.trim()) {
+      // 输入为空但凭据库已保存该平台 Token 时放行（service 层读到存量 token 会走已存路径）
+      if (selectedProvider !== 'memory' && !token.trim() && !hasSavedTokenFor(selectedProvider)) {
         setErrorMsg(`请输入 ${selectedProvider === 'github' ? 'GitHub' : 'Gitee'} 的访问令牌 (Token)`)
         setLoading(false)
         return
@@ -224,6 +253,12 @@ export function GitLiteAuthModal({
                   autoCorrect={false}
                   secureTextEntry
                 />
+
+                {!token.trim() && hasSavedTokenFor(selectedProvider) && (
+                  <Text style={styles.savedTokenNote}>
+                    ✓ 已保存该平台 Token，可直接连接（输入新值则替换）
+                  </Text>
+                )}
 
                 <Text style={styles.securityNote}>
                   🛡️ 安全承诺：Token 仅保存在你的本地设备中，绝不经过任何第三方服务器。
@@ -425,6 +460,12 @@ const styles = StyleSheet.create({
   securityNote: {
     fontSize: 11,
     color: COLORS.textSecondary,
+    marginTop: 6,
+    lineHeight: 16,
+  },
+  savedTokenNote: {
+    fontSize: 11,
+    color: COLORS.success,
     marginTop: 6,
     lineHeight: 16,
   },

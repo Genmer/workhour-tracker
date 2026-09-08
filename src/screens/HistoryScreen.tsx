@@ -17,6 +17,7 @@ import {
   fetchHistoryList,
   fetchHistoryDetail,
   restoreHistorySnapshot,
+  friendlyGitLiteError,
   type HistoryEntry,
   type HistoryDetail,
   type RestoreResult,
@@ -25,11 +26,14 @@ import {
 /** 每页拉取的历史条数 */
 const PAGE_SIZE = 20
 
-/** 提交类型徽标元数据（不同底色区分） */
+/** 提交类型徽标元数据（不同底色区分；含 0.5.1 新增的三个加密迁移 kind） */
 const KIND_META: Record<HistoryEntry['kind'], { label: string; bg: string; color: string }> = {
   sync: { label: '同步', bg: '#E3F2FD', color: '#1565C0' },
   restore: { label: '恢复', bg: '#E8F5E9', color: '#2E7D32' },
   mirror: { label: '镜像', bg: '#F3E5F5', color: '#7B1FA2' },
+  encrypt: { label: '加密', bg: '#FFF8E1', color: '#B26A00' },
+  rekey: { label: '换钥', bg: '#E0F7FA', color: '#00838F' },
+  decrypt: { label: '解密', bg: '#EFEBE9', color: '#5D4037' },
 }
 
 /** 文件变更状态徽标元数据 */
@@ -45,11 +49,15 @@ function formatTime(committedAt: string | null): string {
   return committedAt ? dayjs(committedAt).format('MM-DD HH:mm') : '—'
 }
 
-/** 格式化文档级变更统计（null 降级显示占位符） */
-function formatDocChanges(docChanges: HistoryEntry['docChanges']): string {
-  return docChanges
-    ? `+${docChanges.added} ~${docChanges.modified} -${docChanges.removed}`
-    : '—'
+/** 格式化文档级变更统计（null 时按降级原因显示：配额不足 / 占位符） */
+function formatDocChanges(
+  docChanges: HistoryEntry['docChanges'],
+  reason?: HistoryEntry['docChangesReason']
+): string {
+  if (docChanges) {
+    return `+${docChanges.added} ~${docChanges.modified} -${docChanges.removed}`
+  }
+  return reason === 'quota-exhausted' ? '配额不足' : '—'
 }
 
 /** 字段级变更值的紧凑展示（超长截断） */
@@ -108,7 +116,7 @@ export function HistoryScreen() {
     } catch (e: any) {
       setEntries([])
       setHasMore(false)
-      showToast(e?.message || '加载历史记录失败', 'error')
+      showToast(friendlyGitLiteError(e), 'error')
     } finally {
       if (showLoading) setLoading(false)
     }
@@ -128,7 +136,7 @@ export function HistoryScreen() {
       setPage(nextPage)
       setHasMore(list.length === PAGE_SIZE)
     } catch (e: any) {
-      showToast(e?.message || '加载更多历史失败', 'error')
+      showToast(friendlyGitLiteError(e), 'error')
     } finally {
       setLoadingMore(false)
     }
@@ -150,7 +158,9 @@ export function HistoryScreen() {
     } catch (e: any) {
       setExpandedOid(null)
       showToast(
-        isNotFoundError(e) ? '该记录已超出可查询范围（仅支持最近约 100 条详情）' : e?.message || '加载历史详情失败',
+        isNotFoundError(e)
+          ? '该记录已超出可查询范围（仅支持最近约 100 条详情）'
+          : friendlyGitLiteError(e),
         'error'
       )
     } finally {
@@ -170,7 +180,7 @@ export function HistoryScreen() {
       }
       setRestoreConfirm({ oid, plan })
     } catch (e: any) {
-      showToast(isOfflineError(e) ? '恢复需要云端连接' : e?.message || '生成恢复计划失败', 'error')
+      showToast(isOfflineError(e) ? '恢复需要云端连接' : friendlyGitLiteError(e), 'error')
     } finally {
       setRestoringOid(null)
     }
@@ -189,7 +199,7 @@ export function HistoryScreen() {
       setDetail(null)
       await loadFirstPage(false)
     } catch (e: any) {
-      showToast(isOfflineError(e) ? '恢复需要云端连接' : e?.message || '恢复失败，请稍后重试', 'error')
+      showToast(isOfflineError(e) ? '恢复需要云端连接' : friendlyGitLiteError(e), 'error')
     } finally {
       setRestoringOid(null)
     }
@@ -261,10 +271,16 @@ export function HistoryScreen() {
         )}
 
         <Text style={styles.detailTitle}>
-          文档明细{data.docChanges ? `（${formatDocChanges(data.docChanges)}）` : ''}
+          文档明细{data.docChanges ? `（${formatDocChanges(data.docChanges, data.docChangesReason)}）` : ''}
         </Text>
         {docDetails.length === 0 && (
-          <Text style={styles.detailEmpty}>{data.docChanges ? '暂无明细' : '该提交不支持文档级明细'}</Text>
+          <Text style={styles.detailEmpty}>
+            {data.docChanges
+              ? '暂无明细'
+              : data.docChangesReason === 'quota-exhausted'
+              ? '配额不足，暂无文档级明细'
+              : '该提交不支持文档级明细'}
+          </Text>
         )}
         {docDetails.map((d) => {
           const meta = FILE_STATUS_META[d.status] ?? FILE_STATUS_META.changed
@@ -308,7 +324,12 @@ export function HistoryScreen() {
   }
 
   const renderEntry = (entry: HistoryEntry) => {
-    const kindMeta = KIND_META[entry.kind] ?? KIND_META.sync
+    // 未知 kind 兜底：直接显示原值（灰色中性徽标）
+    const kindMeta = KIND_META[entry.kind] ?? {
+      label: String(entry.kind),
+      bg: '#ECEFF1',
+      color: '#546E7A',
+    }
     const expanded = expandedOid === entry.oid
     return (
       <TouchableOpacity
@@ -333,7 +354,9 @@ export function HistoryScreen() {
         <View style={styles.entryStats}>
           <Text style={styles.oidText}>{entry.oid.slice(0, 7)}</Text>
           <Text style={styles.statText}>📄 {entry.filesChanged ?? '—'}</Text>
-          <Text style={styles.statText}>{formatDocChanges(entry.docChanges)}</Text>
+          <Text style={styles.statText}>
+            {formatDocChanges(entry.docChanges, entry.docChangesReason)}
+          </Text>
         </View>
         {expanded && renderDetail(entry.oid)}
       </TouchableOpacity>

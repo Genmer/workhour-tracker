@@ -18,7 +18,9 @@ import {
   syncPullNow,
   syncNowBothWays,
   restoreHistorySnapshot,
+  alignOtherPlatformRepo,
   type RestoreResult,
+  type MirrorResult,
 } from '../services/gitlite'
 import dayjs from 'dayjs'
 import { Platform } from 'react-native'
@@ -90,6 +92,8 @@ interface AppState {
   pullFromCloud: () => Promise<void>
   syncNow: () => Promise<void>
   restoreSnapshot: (oid: string) => Promise<RestoreResult>
+  /** 仓库对齐：把另一平台的数据仓库收敛镜像为当前平台状态（当前连接为源，数据未变，无需重拉 records） */
+  alignRepos: () => Promise<MirrorResult>
   reconnectProvider: (provider: 'github' | 'gitee' | 'memory', token?: string) => Promise<void>
 
   updateConfig: (config: Partial<AppConfig>) => void
@@ -205,6 +209,11 @@ export const useAppStore = create<AppState>()(
           records: freshRecords,
         }))
         return result
+      },
+
+      alignRepos: async () => {
+        // 当前连接平台即镜像源，其数据保持不变，直接返回镜像结果，不做额外刷新
+        return await alignOtherPlatformRepo()
       },
 
       reconnectProvider: async (provider, token) => {
